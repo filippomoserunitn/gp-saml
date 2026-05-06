@@ -165,10 +165,19 @@ def b64encode_nopadding(data):
 
 def do_fido2_auth(options, origin):
     """Esegue l'autenticazione FIDO2 con la chiave hardware."""
-    # Trova dispositivi FIDO2
-    devices = list(CtapHidDevice.list_devices())
-    if not devices:
-        raise RuntimeError("Nessun dispositivo FIDO2 trovato. Inserisci la chiave di sicurezza.")
+    # Trova dispositivi FIDO2 con retry se non presente
+    while True:
+        devices = list(CtapHidDevice.list_devices())
+        if devices:
+            break
+        print("⚠️  Nessun dispositivo FIDO2 trovato.", file=sys.stderr)
+        try:
+            risposta = input("Inserisci la chiave di sicurezza e premi Invio per riprovare (oppure 'q' per uscire): ").strip().lower()
+            if risposta == 'q':
+                raise RuntimeError("Operazione annullata dall'utente.")
+        except (KeyboardInterrupt, EOFError):
+            print("", file=sys.stderr)
+            raise RuntimeError("Operazione annullata dall'utente.")
     
     device = devices[0]
     print(f"🔐 Trovata chiave: {device}", file=sys.stderr)
