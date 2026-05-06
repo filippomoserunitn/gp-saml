@@ -39,7 +39,7 @@ except Exception:
 # fido2 imports
 try:
     from fido2.hid import CtapHidDevice
-    from fido2.client import Fido2Client, UserInteraction, DefaultClientDataCollector
+    from fido2.client import Fido2Client, UserInteraction, DefaultClientDataCollector, ClientError
     from fido2.webauthn import (
         PublicKeyCredentialRequestOptions, 
         PublicKeyCredentialDescriptor,
@@ -165,27 +165,19 @@ def b64encode_nopadding(data):
 
 def do_fido2_auth(options, origin):
     """Esegue l'autenticazione FIDO2 con la chiave hardware."""
-    # Trova dispositivi FIDO2 con retry se non presente
-    while True:
-        devices = list(CtapHidDevice.list_devices())
-        if devices:
-            break
-        print("⚠️  Nessun dispositivo FIDO2 trovato.", file=sys.stderr)
+    
+    def chiedi_retry(messaggio):
+        """Chiede all'utente se vuole riprovare."""
+        print(messaggio, file=sys.stderr)
         try:
-            risposta = input("Inserisci la chiave di sicurezza e premi Invio per riprovare (oppure 'q' per uscire): ").strip().lower()
+            risposta = input("Inserisci/cambia la chiave di sicurezza e premi Invio per riprovare (oppure 'q' per uscire): ").strip().lower()
             if risposta == 'q':
                 raise RuntimeError("Operazione annullata dall'utente.")
         except (KeyboardInterrupt, EOFError):
             print("", file=sys.stderr)
             raise RuntimeError("Operazione annullata dall'utente.")
     
-    device = devices[0]
-    print(f"🔐 Trovata chiave: {device}", file=sys.stderr)
-    
-    # Crea client FIDO2 (fido2 v1.2+ richiede ClientDataCollector)
-    client = Fido2Client(device, DefaultClientDataCollector(origin), user_interaction=CliInteraction())
-    
-    # Prepara challenge
+    # Prepara challenge (fatto una volta sola)
     challenge = options.get('challenge', '')
     if isinstance(challenge, str):
         challenge = b64decode_padding(challenge)
@@ -220,7 +212,7 @@ def do_fido2_auth(options, origin):
         UserVerificationRequirement.PREFERRED
     )
     
-    # Costruisci le opzioni per l'asserzione usando l'oggetto corretto
+    # Costruisci le opzioni per l'asserzione
     request_options = PublicKeyCredentialRequestOptions(
         challenge=challenge,
         rp_id=rp_id,
@@ -229,9 +221,33 @@ def do_fido2_auth(options, origin):
         timeout=options.get('timeout', 60000),
     )
     
-    # Esegui l'asserzione
-    print("⏳ Attendo autenticazione FIDO2... (tocca la chiave)", file=sys.stderr)
-    result = client.get_assertion(request_options)
+    # Loop per trovare e usare un dispositivo FIDO2 valido
+    while True:
+        # Trova dispositivi FIDO2
+        devices = list(CtapHidDevice.list_devices())
+        if not devices:
+            chiedi_retry("⚠️  Nessun dispositivo FIDO2 trovato.")
+            continue
+        
+        device = devices[0]
+        print(f"🔐 Trovata chiave: {device}", file=sys.stderr)
+        
+        # Crea client FIDO2 (fido2 v1.2+ richiede ClientDataCollector)
+        client = Fido2Client(device, DefaultClientDataCollector(origin), user_interaction=CliInteraction())
+        
+        # Esegui l'asserzione
+        print("⏳ Attendo autenticazione FIDO2... (tocca la chiave)", file=sys.stderr)
+        try:
+            result = client.get_assertion(request_options)
+            break  # Successo, esce dal loop
+        except ClientError as e:
+            if 'CONFIGURATION_UNSUPPORTED' in str(e) or 'UNSUPPORTED_OPTION' in str(e):
+                chiedi_retry(
+                    f"⚠️  La chiave inserita ({device}) non supporta FIDO2/WebAuthn.\n"
+                    "   Usa una chiave con supporto FIDO2 (es. YubiKey 5 o superiore)."
+                )
+                continue
+            raise
     
     # Estrai la risposta - get_response(0) restituisce AuthenticationResponse
     auth_response = result.get_response(0)
