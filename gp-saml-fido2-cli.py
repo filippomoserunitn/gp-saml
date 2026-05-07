@@ -26,17 +26,20 @@ try:
     from requests.adapters import HTTPAdapter
     from urllib3.util.ssl_ import create_urllib3_context
 
+    LEGACY_SSL_OPTION = getattr(ssl, "OP_LEGACY_SERVER_CONNECT", None)
+
     class LegacySSLAdapter(HTTPAdapter):
         """Adapter che permette legacy SSL renegotiation."""
 
         def init_poolmanager(self, *args, **kwargs):
             ctx = create_urllib3_context()
-            ctx.options |= ssl.OP_LEGACY_SERVER_CONNECT
+            ctx.options |= LEGACY_SSL_OPTION
             kwargs["ssl_context"] = ctx
             return super().init_poolmanager(*args, **kwargs)
 
-    HAS_LEGACY_SSL = True
+    HAS_LEGACY_SSL = LEGACY_SSL_OPTION is not None
 except (ImportError, AttributeError):
+    LEGACY_SSL_OPTION = None
     HAS_LEGACY_SSL = False
 
 # fido2 imports: i test del parsing devono poter girare anche senza fido2.
@@ -90,6 +93,7 @@ WEBAUTHN_RESPONSE_FIELDS = (
 )
 LOGIN_USERNAME_FIELDS = ("username", "j_username", "user", "login", "email")
 LOGIN_PASSWORD_FIELDS = ("password", "j_password", "pass", "passwd")
+HTTP_TIMEOUT_DEFAULT = 30.0
 
 
 class GpSamlError(RuntimeError):
@@ -345,6 +349,34 @@ def find_webauthn_entrypoint(html: str, base_url: str) -> Optional[dict[str, Any
             return {"type": "link", "url": urljoin(base_url, href)}
 
     for form in parser.forms:
+        for name, meta in form.get("inputs", {}).items():
+            attrs = meta.get("attrs", {})
+            input_type = attrs.get("type", "text").lower()
+            if input_type not in {"submit", "button", "image"}:
+                continue
+            haystack = " ".join(
+                [
+                    name,
+                    meta.get("value", ""),
+                    attrs.get("value", ""),
+                    attrs.get("alt", ""),
+                    attrs.get("title", ""),
+                    attrs.get("name", ""),
+                ]
+            )
+            if name == "_eventId_runFlow_WebAuthn" or keyword_re.search(haystack):
+                data = form_data(form)
+                if name == "_eventId_runFlow_WebAuthn":
+                    data["_eventId"] = "runFlow_WebAuthn"
+                elif name:
+                    data[name] = meta.get("value", "")
+                return {
+                    "type": "form",
+                    "url": urljoin(base_url, form.get("action", "")) if form.get("action") else base_url,
+                    "method": form.get("method", "GET"),
+                    "data": data,
+                }
+
         for button in form.get("buttons", []):
             attrs = button.get("attrs", {})
             haystack = " ".join([button.get("text", ""), " ".join(attrs.values())])
@@ -483,6 +515,8 @@ def setup_session(args) -> tuple[requests.Session, bool]:
     session = requests.Session()
     if HAS_LEGACY_SSL:
         session.mount("https://", LegacySSLAdapter())
+    elif args.verbose > 1:
+        print("[TLS] Legacy SSL adapter non disponibile su questa build Python/OpenSSL", file=sys.stderr)
     session.headers.update(
         {
             "User-Agent": "PAN GlobalProtect",
@@ -493,10 +527,18 @@ def setup_session(args) -> tuple[requests.Session, bool]:
     return session, verify
 
 
-def post_or_get_form(session, url: str, method: str, data: dict[str, str], verify: bool, allow_redirects=True):
+def post_or_get_form(
+    session,
+    url: str,
+    method: str,
+    data: dict[str, str],
+    verify: bool,
+    timeout: float,
+    allow_redirects=True,
+):
     if method.upper() == "GET":
-        return session.get(url, params=data, verify=verify, allow_redirects=allow_redirects)
-    return session.post(url, data=data, verify=verify, allow_redirects=allow_redirects)
+        return session.get(url, params=data, verify=verify, timeout=timeout, allow_redirects=allow_redirects)
+    return session.post(url, data=data, verify=verify, timeout=timeout, allow_redirects=allow_redirects)
 
 
 def start_gp_prelogin(session, args, verify: bool):
@@ -515,6 +557,7 @@ def start_gp_prelogin(session, args, verify: bool):
             "clientos": args.clientos,
         },
         verify=verify,
+        timeout=args.http_timeout,
     )
     if args.verbose > 1:
         print(f"[1] Risposta: {res.status_code}", file=sys.stderr)
@@ -541,14 +584,21 @@ def extract_saml_request(prelogin_response: requests.Response) -> tuple[str, str
     return decoded, saml_method, None
 
 
-def follow_initial_saml(session, saml_url: str, saml_html: Optional[str], verify: bool):
+def follow_initial_saml(session, saml_url: str, saml_html: Optional[str], verify: bool, timeout: float):
     if saml_html:
         parser = parse_html(saml_html)
         if parser.forms:
             form = parser.forms[0]
             action = form.get("action") or saml_url
-            return post_or_get_form(session, action, form.get("method", "POST"), form_data(form), verify)
-    return session.get(saml_url, verify=verify, allow_redirects=True)
+            return post_or_get_form(
+                session,
+                action,
+                form.get("method", "POST"),
+                form_data(form),
+                verify,
+                timeout,
+            )
+    return session.get(saml_url, verify=verify, timeout=timeout, allow_redirects=True)
 
 
 def do_fido2_auth(options, origin):
@@ -679,7 +729,7 @@ def handle_webauthn_page(session, res, parser, args, verify):
                     data["_eventId"] = "proceed"
                 if args.verbose:
                     print(f"[WebAuthn] Invio risposta a {action}", file=sys.stderr)
-                return session.post(action, data=data, verify=verify, allow_redirects=True)
+                return session.post(action, data=data, verify=verify, timeout=args.http_timeout, allow_redirects=True)
 
     if args.verbose:
         print("[WebAuthn] Nessun form risposta trovato, provo POST diretto", file=sys.stderr)
@@ -687,6 +737,7 @@ def handle_webauthn_page(session, res, parser, args, verify):
         res.url,
         data={"publicKeyCredential": payload, "_eventId": "proceed"},
         verify=verify,
+        timeout=args.http_timeout,
         allow_redirects=True,
     )
 
@@ -698,7 +749,7 @@ def handle_webauthn_entrypoint(session, res, args, verify):
     if entrypoint["type"] == "link":
         if args.verbose:
             print(f"[WebAuthn] Trovato link: {entrypoint['url']}", file=sys.stderr)
-        return session.get(entrypoint["url"], verify=verify, allow_redirects=True)
+        return session.get(entrypoint["url"], verify=verify, timeout=args.http_timeout, allow_redirects=True)
     if args.verbose:
         print(f"[Passkey] Submit form a {entrypoint['url']}", file=sys.stderr)
     return post_or_get_form(
@@ -707,6 +758,7 @@ def handle_webauthn_entrypoint(session, res, args, verify):
         entrypoint.get("method", "POST"),
         entrypoint.get("data", {}),
         verify,
+        args.http_timeout,
     )
 
 
@@ -730,7 +782,7 @@ def handle_login_form(session, res, parser, args, verify):
 
     if args.verbose:
         print(f"[Login] Invio credenziali a {action}", file=sys.stderr)
-    return post_or_get_form(session, action, login_form.get("method", "POST"), data, verify)
+    return post_or_get_form(session, action, login_form.get("method", "POST"), data, verify, args.http_timeout)
 
 
 def extract_gp_auth_result(res: requests.Response, verbose: int) -> dict[str, str]:
@@ -798,10 +850,20 @@ def print_openconnect_result(result: dict[str, str], args):
     print(f"USER={username}")
     print(f"COOKIE={cookie_value}")
     print("\nPer connetterti:")
+    openconnect_args = [
+        "sudo",
+        "openconnect",
+        "--protocol=gp",
+        "--useragent=PAN GlobalProtect",
+        f"--user={username}",
+        f"--os={args.clientos.lower()}",
+        f"--usergroup={interface}:{cookie_name}",
+        "--passwd-on-stdin",
+        args.server,
+    ]
     print(
-        f"  echo '{cookie_value}' | sudo openconnect --protocol=gp "
-        f"--user={username} --os={args.clientos.lower()} "
-        f"--usergroup={interface}:{cookie_name} --passwd-on-stdin {args.server}"
+        f"  printf '%s\\n' {quote(cookie_value)} | "
+        f"{' '.join(quote(arg) for arg in openconnect_args)}"
     )
 
 
@@ -815,7 +877,7 @@ def handle_saml_response(session, res, parser, args, verify):
     if args.verbose:
         print(f"[SAML] Invio SAMLResponse a {action}", file=sys.stderr)
 
-    saml_res = session.post(action, data=data, verify=verify, allow_redirects=False)
+    saml_res = session.post(action, data=data, verify=verify, timeout=args.http_timeout, allow_redirects=False)
     if args.verbose > 1:
         print(f"[SAML] Risposta {saml_res.status_code}", file=sys.stderr)
         for header, value in saml_res.headers.items():
@@ -835,7 +897,12 @@ def handle_saml_response(session, res, parser, args, verify):
     if saml_res.is_redirect:
         location = saml_res.headers.get("Location", "")
         if location:
-            return session.get(urljoin(saml_res.url, location), verify=verify, allow_redirects=True)
+            return session.get(
+                urljoin(saml_res.url, location),
+                verify=verify,
+                timeout=args.http_timeout,
+                allow_redirects=True,
+            )
     return saml_res
 
 
@@ -846,7 +913,7 @@ def handle_proceed_link(session, res, args, verify):
     link = urljoin(res.url, match.group(1))
     if args.verbose:
         print(f"[Proceed] {link}", file=sys.stderr)
-    return session.get(link, verify=verify, allow_redirects=True)
+    return session.get(link, verify=verify, timeout=args.http_timeout, allow_redirects=True)
 
 
 def run_auth_flow(session, res, args, verify):
@@ -892,6 +959,12 @@ def build_arg_parser():
     parser.add_argument("--clientos", default="Linux", choices=["Linux", "Windows", "Mac"], help="Client OS da simulare")
     parser.add_argument("--allow-insecure-crypto", action="store_true", help="Passa --allow-insecure-crypto a openconnect")
     parser.add_argument("--max-steps", type=int, default=10, help="Numero massimo di step nel flusso SAML/FIDO2")
+    parser.add_argument(
+        "--http-timeout",
+        type=float,
+        default=HTTP_TIMEOUT_DEFAULT,
+        help="Timeout HTTP in secondi per le richieste al portal/IdP",
+    )
 
     iface_group = parser.add_mutually_exclusive_group()
     iface_group.add_argument(
@@ -919,6 +992,9 @@ def main():
     if args.max_steps < 1:
         print("Errore: --max-steps deve essere >= 1", file=sys.stderr)
         sys.exit(2)
+    if args.http_timeout <= 0:
+        print("Errore: --http-timeout deve essere > 0 secondi", file=sys.stderr)
+        sys.exit(2)
 
     session, verify = setup_session(args)
     last_response = None
@@ -931,7 +1007,7 @@ def main():
         if not saml_url:
             raise GpSamlError("SAML URL assente nel form iniziale")
 
-        res = follow_initial_saml(session, saml_url, saml_html, verify)
+        res = follow_initial_saml(session, saml_url, saml_html, verify, args.http_timeout)
         last_response = res
         if args.verbose:
             print(f"[3] Pagina IdP: {res.url}", file=sys.stderr)

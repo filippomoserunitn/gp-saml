@@ -91,7 +91,8 @@ sudo pacman -S openconnect
 
 ```
 usage: gp-saml-fido2-cli.py [-h] [-u USER] [-v] [-k] [-x] [--clientos {Linux,Windows,Mac}]
-                            [--allow-insecure-crypto] [--max-steps MAX_STEPS] [-g | -p] server
+                            [--allow-insecure-crypto] [--max-steps MAX_STEPS]
+                            [--http-timeout HTTP_TIMEOUT] [-g | -p] server
 
 positional arguments:
   server                GlobalProtect server (es: vpn.example.com)
@@ -108,6 +109,8 @@ options:
                         Passa --allow-insecure-crypto a openconnect
   --max-steps MAX_STEPS
                         Numero massimo di step nel flusso SAML/FIDO2
+  --http-timeout HTTP_TIMEOUT
+                        Timeout HTTP in secondi per le richieste al portal/IdP
   -g, --gateway         Usa gateway interface (ssl-vpn/prelogin.esp)
   -p, --portal          Usa portal interface (global-protect/prelogin.esp) [default]
 ```
