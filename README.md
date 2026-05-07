@@ -91,7 +91,7 @@ sudo pacman -S openconnect
 
 ```
 usage: gp-saml-fido2-cli.py [-h] [-u USER] [-v] [-k] [-x] [--clientos {Linux,Windows,Mac}]
-                            [--allow-insecure-crypto] [-g | -p] server
+                            [--allow-insecure-crypto] [--max-steps MAX_STEPS] [-g | -p] server
 
 positional arguments:
   server                GlobalProtect server (es: vpn.example.com)
@@ -106,9 +106,13 @@ options:
                         Client OS da simulare
   --allow-insecure-crypto
                         Passa --allow-insecure-crypto a openconnect
+  --max-steps MAX_STEPS
+                        Numero massimo di step nel flusso SAML/FIDO2
   -g, --gateway         Usa gateway interface (ssl-vpn/prelogin.esp)
   -p, --portal          Usa portal interface (global-protect/prelogin.esp) [default]
 ```
+
+Nota: `--insecure` disabilita la verifica TLS/certificato. Usalo solo su reti e server fidati.
 
 ## Flusso di autenticazione
 
