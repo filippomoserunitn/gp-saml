@@ -835,6 +835,7 @@ def print_openconnect_result(result: dict[str, str], args):
             f"--os={args.clientos.lower()}",
             f"--usergroup={interface}:{cookie_name}",
             "--passwd-on-stdin",
+            "--csd-wrapper=/usr/libexec/openconnect/hipreport.sh",
             args.server,
         ]
         if args.allow_insecure_crypto:
@@ -853,12 +854,14 @@ def print_openconnect_result(result: dict[str, str], args):
     openconnect_args = [
         "sudo",
         "openconnect",
+        "--background",
         "--protocol=gp",
         "--useragent=PAN GlobalProtect",
         f"--user={username}",
         f"--os={args.clientos.lower()}",
         f"--usergroup={interface}:{cookie_name}",
         "--passwd-on-stdin",
+        "--csd-wrapper=/usr/libexec/openconnect/hipreport.sh",
         args.server,
     ]
     print(

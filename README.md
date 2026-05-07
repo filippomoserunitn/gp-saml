@@ -87,6 +87,14 @@ sudo pacman -S openconnect
 ./gp-saml-fido2-cli.py -x -u utente@dominio.it vpn.example.com
 ```
 
+### Esempio per utenti UniTN
+
+```bash
+./gp-saml-fido2-cli.py -u <Username>@unitn.it vpn-mfa.icts.unitn.it
+```
+
+Sostituisci `<Username>` con il tuo nome utente UniTN (es: mario.rossi@unitn.it).
+
 ### Opzioni
 
 ```
